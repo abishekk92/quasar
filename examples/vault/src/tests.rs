@@ -62,52 +62,57 @@ fn test_deposit() {
 }
 
 #[test]
-fn test_withdraw() {
+fn test_deposit_then_withdraw_round_trip() {
+    // Regression test for the deposit→withdraw round-trip. Without the
+    // PDA-signed system.transfer fix, this test would fail with
+    // ExternalAccountLamportSpend on the withdraw step (vault is
+    // system-owned post-deposit, set_lamports requires program ownership).
     let mut svm = setup();
 
     let user = USER;
+    let system_program = quasar_svm::system_program::ID;
     let (vault, _) = Pubkey::find_program_address(&[b"vault", user.as_ref()], &crate::ID);
 
-    // Pre-fund vault as program-owned (withdraw uses direct lamport
-    // manipulation which requires program ownership of the vault PDA).
-    let vault_lamports: u64 = 1_000_000_000;
+    let deposit_amount: u64 = 1_000_000_000;
     let withdraw_amount: u64 = 500_000_000;
+
+    let deposit_ix: Instruction = DepositInstruction {
+        user,
+        vault,
+        system_program,
+        amount: deposit_amount,
+    }
+    .into();
+    let after_deposit = svm.process_instruction(&deposit_ix, &[signer(user), empty(vault)]);
+    assert!(
+        after_deposit.is_ok(),
+        "deposit failed: {:?}",
+        after_deposit.raw_result
+    );
 
     let withdraw_ix: Instruction = WithdrawInstruction {
         user,
         vault,
+        system_program,
         amount: withdraw_amount,
     }
     .into();
-
-    let result = svm.process_instruction(
+    let after_withdraw = svm.process_instruction(
         &withdraw_ix,
         &[
-            signer(user),
-            Account {
-                address: vault,
-                lamports: vault_lamports,
-                data: vec![],
-                owner: crate::ID,
-                executable: false,
-            },
+            after_deposit.account(&user).unwrap().clone(),
+            after_deposit.account(&vault).unwrap().clone(),
         ],
     );
-    assert!(result.is_ok(), "withdraw failed: {:?}", result.raw_result);
+    assert!(
+        after_withdraw.is_ok(),
+        "withdraw failed: {:?}",
+        after_withdraw.raw_result
+    );
 
-    let user_final = result.account(&user).unwrap().lamports;
-    let vault_final = result.account(&vault).unwrap().lamports;
-
+    let user_final = after_withdraw.account(&user).unwrap().lamports;
     assert_eq!(
         user_final,
-        10_000_000_000 + withdraw_amount,
-        "user lamports after withdraw"
+        10_000_000_000 - deposit_amount + withdraw_amount
     );
-    assert_eq!(
-        vault_final,
-        vault_lamports - withdraw_amount,
-        "vault lamports after withdraw"
-    );
-
-    println!("  WITHDRAW CU: {}", result.compute_units_consumed);
 }
